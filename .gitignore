@@ -1,0 +1,15 @@
+.env
+
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
