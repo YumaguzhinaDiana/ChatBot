@@ -7,6 +7,8 @@ from typing import List, Dict, Optional
 import time
 from functools import wraps
 import re
+from transformer import UniversalDietDetector
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,8 +21,10 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 SPOONACULAR_API_KEY = os.getenv('SPOONACULAR_API_KEY')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
 
-if not TELEGRAM_TOKEN or not SPOONACULAR_API_KEY or not DEEPSEEK_API_KEY:
+
+if not TELEGRAM_TOKEN or not SPOONACULAR_API_KEY or not DEEPSEEK_API_KEY or not HUGGINGFACE_API_KEY:
     raise ValueError("Не найдены токены в .env файле")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -28,6 +32,10 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
 DEEPSEEK_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek/deepseek-r1"
+diet_detector = UniversalDietDetector(HUGGINGFACE_API_KEY)
+
+
+selected_command = ""
 
 
 def clean_deepseek_response(text: str) -> str:
@@ -191,7 +199,7 @@ def search_recipes_by_ingredients(ingredients: List[str], number: int = 10) -> O
         'ignorePantry': True,
         'limitLicense': False
     }
-
+    logger.info(params)
     try:
         response = requests.get(
             f"{SPOONACULAR_BASE_URL}/recipes/findByIngredients",
@@ -240,7 +248,9 @@ def create_main_keyboard():
     """Создание главной клавиатуры"""
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        telebot.types.KeyboardButton("🔍 Найти рецепт"),
+        telebot.types.KeyboardButton("🔎 Найти рецепт по названию"),
+        telebot.types.KeyboardButton("🔍 Найти рецепт по ингредиентам"),
+        telebot.types.KeyboardButton("🍴 Найти рецепты с учетом ограничений"),
         telebot.types.KeyboardButton("❓ Помощь"),
         telebot.types.KeyboardButton("🏠 Главное меню")
     )
@@ -276,12 +286,15 @@ def start_command(message):
         "• **Сортирую рецепты по количеству совпадений**\n\n"
         "📋 *Команды:*\n"
         "/start - это меню\n"
+        "/search название - поиск рецепта по названию\n"
         "/find продукты - поиск рецептов\n"
+        "/diet_find ограничения - поиск рецептов по диете\n"
         "/help - подробная справка\n\n"
         "*Пример:* `/find курица картошка лук`\n\n"
         "Приятного аппетита)"
     )
-
+    global selected_command
+    selected_command="start"
     bot.send_message(
         message.chat.id,
         welcome_text,
@@ -293,6 +306,9 @@ def start_command(message):
 @bot.message_handler(commands=['help'])
 def help_command(message):
     """Подробная справка"""
+    global selected_command
+    selected_command = "help"
+
     help_text = (
         "📚 *Подробная справка*\n\n"
         "*Как это работает:*\n"
@@ -306,9 +322,13 @@ def help_command(message):
         "• `/start` - Главное меню\n"
         "• `/find [продукты]` - Поиск рецептов\n"
         "  Пример: `/find курица рис лук`\n"
+        "• `/diet_find [ограничения]` - Поиск рецептов с учетом диет\n"
+        "  Пример: `/diet_find вегетерианство без сахара`\n"
         "• `/help` - Эта справка\n\n"
         "*Кнопки:*\n"
-        "• 🔍 Найти рецепт - быстрый поиск\n"
+        "• 🔎 Найти рецепт по названию - быстрый поиск по названию\n"
+        "• 🔍 Найти рецепт по ингредиентам - быстрый поиск по введенным ингредиентам\n"
+        "• 🍴 Найти рецепты с учетом ограничений - диетический поиск\n"
         "• ❓ Помощь - показать справку\n"
         "• 🏠 Главное меню - вернуться\n\n"
         "✨ *Особенности:*\n"
@@ -330,6 +350,9 @@ def help_command(message):
 @handle_api_errors
 def find_command(message):
     """Обработчик команды /find - поиск рецептов с сортировкой"""
+
+    global selected_command
+    selected_command = "search_ingredients"
     command_parts = message.text.split(maxsplit=1)
 
     if len(command_parts) < 2:
@@ -404,6 +427,94 @@ def find_command(message):
     )
 
 
+@bot.message_handler(commands=['diet_find'])
+@handle_api_errors
+def diet_find_command(message):
+    global selected_command
+    command_parts = message.text.split(maxsplit=1)
+
+    if len(command_parts) < 2:
+        bot.reply_to(
+            message,
+            "*Напишите ограничения после /diet_find*\n\n"
+            "Пример: `/diet_find вегетерианство без сахара`",
+            parse_mode='Markdown',
+            reply_markup=create_main_keyboard()
+        )
+        return
+    selected_command ="diet_search"
+    diet_analysis = diet_detector.analyze(message.text)
+
+    if diet_analysis['all_restrictions']:
+        restrictions = "\n".join(f"• {r}" for r in diet_analysis['all_restrictions'])
+        bot.send_message(
+            message.chat.id,
+            f"✅ *Понял ваши ограничения:*\n{restrictions}",
+            parse_mode='Markdown'
+        )
+
+    status_msg = bot.reply_to(
+        message,
+        f"🔍 *Ищу и сортирую рецепты...*\n\n",
+        parse_mode='Markdown'
+    )
+    bot.edit_message_text(
+        "🔍 *Ищу подходящие рецепты...*",
+        message.chat.id,
+        status_msg.message_id,
+        parse_mode='Markdown'
+    )
+
+    recipes = search_with_diet(diet_analysis)
+    logger.info(recipes)
+
+    if not recipes:
+        bot.edit_message_text(
+            "😔 *Рецепты не найдены*\n\n"
+            "Попробуйте другие продукты или нажмите /help",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='Markdown',
+            reply_markup=create_main_keyboard()
+        )
+        return
+
+    bot.delete_message(message.chat.id, status_msg.message_id)
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+
+    for recipe in recipes[:5]:
+        translated_title = translate_recipe_title(recipe['title'])
+        callback_data = f"recipe_{recipe['id']}"
+
+        match_text = f"✅ {recipe['usedIngredientCount']} совп."
+
+        button_text = f"🍽️ {translated_title[:35]}... ({match_text})"
+
+        button = telebot.types.InlineKeyboardButton(
+            text=button_text,
+            callback_data=callback_data
+        )
+        markup.add(button)
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🏠 В главное меню",
+        callback_data="back_to_main"
+    ))
+
+    info_text = (
+        f"✅ *Найдено рецептов:* {len(recipes)}\n"
+        f"👇 *Выберите рецепт:*"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        info_text,
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith('recipe_'))
 @handle_api_errors
 def recipe_callback(call):
@@ -468,18 +579,50 @@ def back_to_main_callback(call):
     """Возврат в главное меню"""
     bot.answer_callback_query(call.id, "🏠 Возврат в меню")
     bot.delete_message(call.message.chat.id, call.message.message_id)
+
     start_command(call.message)
 
 
-@bot.message_handler(func=lambda message: message.text == "🔍 Найти рецепт")
+@bot.message_handler(func=lambda message: message.text == "🔎 Найти рецепт по названию")
+def find_name_button_handler(message):
+    """Кнопка поиска рецепта"""
+    global selected_command
+    selected_command = "search_name"
+    bot.reply_to(
+        message,
+        "📝 *Введите название :*\n"
+        "Например: `борщ`",
+        parse_mode='Markdown'
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "🔍 Найти рецепт по ингредиентам")
 def find_button_handler(message):
     """Кнопка поиска рецепта"""
+    global selected_command
+    selected_command = "search_ingredients"
     bot.reply_to(
         message,
         "📝 *Введите продукты через пробел:*\n"
         "Например: `курица картошка лук`",
         parse_mode='Markdown'
     )
+
+@bot.message_handler(func=lambda message: message.text == "🍴 Найти рецепты с учетом ограничений")
+def find_button_handler(message):
+    """Кнопка поиска рецепта"""
+    global selected_command
+    bot.reply_to(
+        message,
+       "🥗 *Диетический поиск*\n\n"
+        "Введите ваши ограничения в одном сообщении.\n\n"
+        "*Форматы:*\n"
+        "• С продуктами: `веган без хлеба`\n"
+        "• Только диета: `палео`\n"
+        "• С похудением: `худею без глютена`\n\n",
+        parse_mode='Markdown'
+    )
+    selected_command = "diet_search"
 
 
 @bot.message_handler(func=lambda message: message.text == "❓ Помощь")
@@ -498,40 +641,86 @@ def main_menu_button_handler(message):
 @handle_api_errors
 def text_handler(message):
     """Обработка текстовых сообщений - поиск рецептов с сортировкой"""
+    global selected_command
     if message.text.startswith('/'):
         return
-
-    ingredients = [ing.strip() for ing in message.text.split()]
-
-    if len(ingredients) > 10:
-        bot.reply_to(
-            message,
-            "⚠️ *Слишком много продуктов*\n"
-            "Укажите не более 10 основных ингредиентов.",
-            parse_mode='Markdown'
-        )
-        return
-
+    recipes = []
     status_msg = bot.reply_to(
         message,
-        f"🔍 *Ищу и сортирую рецепты...*\n\n"
-        f"Продукты: {', '.join(ingredients)}",
+        f"🔍 *Ищу и сортирую рецепты...*\n\n",
         parse_mode='Markdown'
     )
 
-    recipes = search_recipes_by_ingredients(ingredients, number=10)
+    logger.info(f"selected command - {selected_command}")
+    if selected_command == "search_ingredients":
+        ingredients = [ing.strip() for ing in message.text.split()]
 
-    if not recipes:
+        if len(ingredients) > 10:
+            bot.reply_to(
+                message,
+                "⚠️ *Слишком много продуктов*\n"
+                "Укажите не более 10 основных ингредиентов.",
+                parse_mode='Markdown'
+            )
+            return
+
         bot.edit_message_text(
-            "😔 *Рецепты не найдены*\n\n"
-            "Попробуйте другие продукты или нажмите /help",
+            "🔍 *Ищу подходящие рецепты...*",
             message.chat.id,
             status_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        recipes = search_recipes_by_ingredients(ingredients, number=10)
+        logger.info(recipes)
+
+    elif selected_command == "diet_search":
+        diet_analysis = diet_detector.analyze(message.text)
+
+        if diet_analysis['all_restrictions']:
+            restrictions = "\n".join(f"• {r}" for r in diet_analysis['all_restrictions'])
+            bot.send_message(
+                message.chat.id,
+                f"✅ *Понял ваши ограничения:*\n{restrictions}",
+                parse_mode='Markdown'
+            )
+
+        bot.edit_message_text(
+            "🔍 *Ищу подходящие рецепты...*",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        recipes = search_with_diet( diet_analysis)
+        logger.info(recipes)
+
+    elif selected_command == "search_name":
+        search_query = message.text
+
+        bot.edit_message_text(
+            "🔍 *Ищу подходящие рецепты...*",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        recipes = search_recipe_by_name(search_query)
+
+    if len(recipes)==0  or not recipes:
+        logger.info(f"Найдено рецептов: {len(recipes)} отсовтсовтсл")
+        bot.delete_message(message.chat.id, status_msg.message_id)
+
+        bot.send_message(
+            message.chat.id,
+            "😔 *Рецепты не найдены*\n\n"
+            "Попробуйте ввести по другому или нажмите /help",
             parse_mode='Markdown',
             reply_markup=create_main_keyboard()
         )
         return
 
+    logger.info("continue")
     bot.delete_message(message.chat.id, status_msg.message_id)
 
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
@@ -539,8 +728,10 @@ def text_handler(message):
     for recipe in recipes[:5]:
         translated_title = translate_recipe_title(recipe['title'])
         callback_data = f"recipe_{recipe['id']}"
+        match_text = ""
 
-        match_text = f"✅ {recipe['usedIngredientCount']} совп."
+        if recipe['usedIngredientCount'] is not None:
+            match_text = f"✅ {recipe['usedIngredientCount']} совп."
 
         button_text = f"🍽️ {translated_title[:35]}... ({match_text})"
 
@@ -567,6 +758,165 @@ def text_handler(message):
         reply_markup=markup
     )
 
+
+def search_with_diet( diet_analysis: Dict) -> Optional[Dict]:
+    """
+    Поиск рецептов с учетом анализа диет
+    """
+    params = {
+        'apiKey': SPOONACULAR_API_KEY,
+        'number': 8,
+        'addRecipeInformation': True,
+        'fillIngredients': True,
+        'instructionsRequired': True,
+        'ignorePantry': True
+    }
+
+    spoonacular_params = diet_analysis['spoonacular_params']
+    params.update(spoonacular_params)
+
+    params['sort'] = 'popularity'
+
+    logger.info(f"Параметры запроса: {params}")
+    logger.info(f"Параметры запроса: {type(params)}")
+    try:
+        response = requests.get(
+            f"{SPOONACULAR_BASE_URL}/recipes/complexSearch",
+            params=params,
+            timeout=15
+        )
+        response.raise_for_status()
+
+        recipes = response.json().get('results', [])
+
+        if recipes:
+            logger.info(f"Найдено рецептов: {len(recipes)}")
+            return recipes[:5]
+        else:
+            logger.info("Рецепты не найдены")
+            return []
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+        return None
+
+
+def search_recipe_by_name(recipe_name: str, number: int = 8) -> Optional[List[Dict]]:
+    """
+    Поиск рецептов по названию через Spoonacular API
+
+    """
+    recipe_name1 = diet_detector.translate_to_english_title(recipe_name)
+    logger.info(f"transleted name: {recipe_name} -> {recipe_name1}")
+    params = {
+        'apiKey': SPOONACULAR_API_KEY,
+        'query': recipe_name1,
+        'number': number,
+        'addRecipeInformation': True,
+        'fillIngredients': True,
+        'instructionsRequired': True,
+        'sort': 'popularity'
+    }
+
+    try:
+        logger.info(f"Поиск рецепта по названию: {recipe_name}")
+        response = requests.get(
+            f"{SPOONACULAR_BASE_URL}/recipes/complexSearch",
+            params=params,
+            timeout=15
+        )
+        response.raise_for_status()
+
+        recipes = response.json().get('results', [])
+
+        if recipes:
+            logger.info(f"Найдено рецептов: {len(recipes)}")
+            return recipes
+        else:
+            logger.info("Рецепты не найдены")
+            return []
+
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при поиске рецепта")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка запроса: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+        return None
+
+
+@bot.message_handler(commands=['search'])
+def search_recipe_command(message):
+    """Обработчик команды /search для поиска рецептов по названию"""
+    command_parts = message.text.split(maxsplit=1)
+
+    if len(command_parts) < 2:
+        bot.reply_to(
+            message,
+            "🔍 *Поиск рецептов по названию*\n\n"
+            "Использование: `/search название рецепта`\n"
+            "Пример: `/search борщ`\n"
+            "Пример: `/search паста карбонара`",
+            parse_mode='Markdown'
+        )
+        return
+
+    search_query = command_parts[1]
+
+    status_msg = bot.reply_to(
+        message,
+        f"🔍 *Ищу рецепты по запросу:* '{search_query}'",
+        parse_mode='Markdown'
+    )
+
+    recipes = search_recipe_by_name(search_query)
+
+    if not recipes or len(recipes)==0:
+        logger.info("recipes not found")
+        bot.edit_message_text(
+            f"😔 По запросу '{search_query}' ничего не найдено.\n\n"
+            "Попробуйте:\n"
+            "• Другое название\n"
+            "• Более короткий запрос\n"
+            "• Проверить орфографию",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='Markdown'
+        )
+        return
+
+    bot.delete_message(message.chat.id, status_msg.message_id)
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+
+    for recipe in recipes[:5]:
+        translated_title = translate_recipe_title(recipe['title'])
+        callback_data = f"recipe_{recipe['id']}"
+        button_text = f"🍽️ {translated_title[:35]}..."
+
+        button = telebot.types.InlineKeyboardButton(
+            text=button_text,
+            callback_data=callback_data
+        )
+        markup.add(button)
+
+    markup.add(telebot.types.InlineKeyboardButton(
+        "🏠 В главное меню",
+        callback_data="back_to_main"
+    ))
+
+    info_text = (
+        f"✅ *Найдено рецептов:* {len(recipes)}\n"
+        f"👇 *Выберите рецепт:*"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        info_text,
+        parse_mode='Markdown',
+        reply_markup=markup
+    )
 
 def main():
     """Запуск бота"""
