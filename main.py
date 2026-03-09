@@ -3,10 +3,11 @@ import telebot
 import requests
 from dotenv import load_dotenv
 import logging
-from typing import List, Dict, Optional
+from typing import Dict, Optional, List
 import time
 from functools import wraps
 import re
+import random
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,9 +30,17 @@ SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
 DEEPSEEK_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek/deepseek-r1"
 
+AVAILABLE_EMOTIONS = [
+    "грустно", "весело", "злой", "устал",
+    "влюблен", "стресс", "счастлив", "одиноко",
+    "ностальгия", "энергия", "романтика", "голоден"
+]
+
 
 def clean_deepseek_response(text: str) -> str:
     """Очистка ответа DeepSeek от тегов и лишнего текста"""
+    if not text:
+        return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -40,6 +49,9 @@ def clean_deepseek_response(text: str) -> str:
 
 def translate_with_deepseek(text: str, instruction: str) -> str:
     """Универсальная функция для перевода/обработки текста через DeepSeek"""
+    if not text or not DEEPSEEK_API_KEY:
+        return text
+
     try:
         headers = {
             "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -85,134 +97,251 @@ def translate_with_deepseek(text: str, instruction: str) -> str:
         return text
 
 
-def translate_ingredients_to_english(ingredients: List[str]) -> List[str]:
-    """Перевод списка продуктов на английский для поиска"""
-    ingredients_text = ", ".join(ingredients)
-
-    instruction = (
-        "Переведи следующие продукты на английский язык для поиска рецептов. "
-        "Верни ТОЛЬКО переведенные слова через запятую, без пояснений, без цифр, без точек. "
-        "Пример формата: chicken, potato, onion"
-        "Ингредиенты состоящие из двух и более слов должны считаться как один ингредиент"
-    )
-
-    result = translate_with_deepseek(ingredients_text, instruction)
-
-    translated = [item.strip().lower() for item in result.split(',') if item.strip()]
-
-    if not translated:
-        return [ing.lower() for ing in ingredients]
-
-    logger.info(f"DeepSeek перевел: {ingredients} -> {translated}")
-    return translated
-
-
 def translate_recipe_title(title: str) -> str:
     """Перевод названия рецепта на русский"""
+    if not title:
+        return "Рецепт"
+
     instruction = (
         "Переведи название рецепта на русский язык. "
         "Верни ТОЛЬКО переведенное название, без пояснений."
     )
-    return translate_with_deepseek(title, instruction)
+    translated = translate_with_deepseek(title, instruction)
+    return translated if translated else title
 
 
-def format_full_recipe(recipe: Dict) -> str:
-    """Форматирование полного рецепта с переводом на русский"""
-
-    translated_title = translate_recipe_title(recipe['title'])
-
-    recipe_parts = []
-
-    if recipe.get('readyInMinutes'):
-        recipe_parts.append(f"⏱️ *Время:* {recipe['readyInMinutes']} минут")
-    if recipe.get('servings'):
-        recipe_parts.append(f"👥 *Порций:* {recipe['servings']}")
-
-    if recipe_parts:
-        recipe_parts.append("")
-
-    if recipe.get('extendedIngredients'):
-        recipe_parts.append("📝 *Ингредиенты:*")
-
-        ingredients_list = []
-        for ing in recipe['extendedIngredients']:
-            ingredients_list.append(f"• {ing['original']}")
-
-        ingredients_text = "\n".join(ingredients_list)
-
-        translated_ingredients = translate_with_deepseek(
-            ingredients_text,
-            "Переведи список ингредиентов на русский язык. Сохрани формат с точками в начале строки. "
-            "Переведи меры (teaspoon -> чайная ложка, cup -> стакан, tablespoon -> столовая ложка, cloves -> зубчики). "
-            "Названия продуктов переведи на русский. Сохрани все числа и меры."
+def get_search_query_by_emotion(emotion: str) -> str:
+    """Получение поискового запроса для Spoonacular по эмоции через DeepSeek"""
+    try:
+        instruction = (
+            f"Пользователь чувствует '{emotion}'. Придумай ОДИН поисковый запрос на АНГЛИЙСКОМ языке "
+            f"для сайта с рецептами (Spoonacular), чтобы найти блюдо, которое идеально подходит под это настроение.\n\n"
+            f"Запрос должен состоять из 1-3 слов на английском, которые помогут найти конкретные рецепты.\n\n"
+            f"Примеры:\n"
+            f"грустно → comfort food\n"
+            f"весело → party food\n"
+            f"энергия → protein breakfast\n\n"
+            f"Верни ТОЛЬКО поисковый запрос, без пояснений и дополнительного текста."
         )
 
-        recipe_parts.append(translated_ingredients)
-        recipe_parts.append("")
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-    if recipe.get('instructions'):
-        recipe_parts.append("*Приготовление:*")
+        data = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": instruction}],
+            "temperature": 0.5,
+            "max_tokens": 50
+        }
 
-        instructions = recipe['instructions']
-        instructions = instructions.replace('<ol>', '').replace('</ol>', '')
-        instructions = instructions.replace('<li>', '• ').replace('</li>', '\n')
-        instructions = re.sub(r'<[^>]+>', '', instructions)
-
-        translated_instructions = translate_with_deepseek(
-            instructions,
-            "Переведи инструкцию по приготовлению на русский язык. "
-            "Сохрани формат с точками в начале шагов. "
-            "Переведи температуру (350°F -> 175°C, 400°F -> 200°C и т.д.). "
-            "Переведи все кулинарные термины понятно и подробно. "
-            "Сохрани нумерацию шагов если она есть."
+        response = requests.post(
+            DEEPSEEK_URL,
+            headers=headers,
+            json=data,
+            timeout=30
         )
 
-        recipe_parts.append(translated_instructions)
-        recipe_parts.append("")
+        if response.status_code == 200:
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            query = clean_deepseek_response(content).strip().lower()
+            logger.info(f"DeepSeek сгенерировал запрос для эмоции '{emotion}': {query}")
+            return query
+        else:
+            logger.error(f"Ошибка DeepSeek API: {response.status_code}")
+            return "food"
 
-    if recipe.get('sourceUrl'):
-        recipe_parts.append(f"[Полный рецепт (оригинал)]({recipe['sourceUrl']})")
-
-    full_recipe = "\n".join(recipe_parts)
-
-    return f"*{translated_title}*\n\n{full_recipe}"
+    except Exception as e:
+        logger.error(f"Ошибка при получении поискового запроса: {e}")
+        return "food"
 
 
-def search_recipes_by_ingredients(ingredients: List[str], number: int = 10) -> Optional[List[Dict]]:
-    """Поиск рецептов по ингредиентам с сортировкой по совпадениям"""
-
-    translated = translate_ingredients_to_english(ingredients)
-
+def search_recipes_by_emotion(emotion: str, number: int = 3) -> Optional[List[Dict]]:
+    """Поиск рецептов по эмоции через AI-сгенерированный запрос"""
+    query = get_search_query_by_emotion(emotion)
     params = {
         'apiKey': SPOONACULAR_API_KEY,
-        'ingredients': ','.join(translated),
+        'query': query,
         'number': number,
-        'ranking': 1,
-        'ignorePantry': True,
-        'limitLicense': False
+        'sort': 'popularity',
+        'sortDirection': 'desc'
     }
 
     try:
         response = requests.get(
-            f"{SPOONACULAR_BASE_URL}/recipes/findByIngredients",
+            f"{SPOONACULAR_BASE_URL}/recipes/complexSearch",
             params=params,
             timeout=15
         )
-        response.raise_for_status()
-        recipes = response.json()
 
-        if recipes:
-            sorted_recipes = sorted(
-                recipes,
-                key=lambda x: (x['usedIngredientCount'], -x['missedIngredientCount']),
-                reverse=True
+        if response.status_code == 402:
+            logger.error("Превышен лимит запросов Spoonacular API")
+            return None
+
+        response.raise_for_status()
+        data = response.json()
+        results = data.get('results', [])
+
+        if results:
+            logger.info(f"Найдено {len(results)} рецептов по запросу '{query}' для эмоции '{emotion}'")
+        else:
+            logger.info(f"Ничего не найдено по запросу '{query}', пробуем общий запрос")
+            params['query'] = 'food'
+            response = requests.get(
+                f"{SPOONACULAR_BASE_URL}/recipes/complexSearch",
+                params=params,
+                timeout=15
             )
-            logger.info(f"Найдено и отсортировано {len(sorted_recipes)} рецептов")
-            return sorted_recipes[:5]
-        return recipes
+            response.raise_for_status()
+            data = response.json()
+            results = data.get('results', [])
+
+        return results
 
     except Exception as e:
-        logger.error(f"Ошибка Spoonacular API: {e}")
+        logger.error(f"Ошибка поиска рецептов по эмоции: {e}")
+        return None
+
+
+def get_emotion_description(emotion: str, recipe_title: str) -> str:
+    """Получение красивого описания почему это блюдо подходит под настроение"""
+    try:
+        instruction = (
+            f"Пользователь чувствует '{emotion}'. Был найден рецепт '{recipe_title}'. "
+            f"Напиши ОДНО короткое предложение на русском языке, почему это блюдо идеально подходит под это настроение.\n\n"
+            f"Примеры:\n"
+            f"грустно, 'Картофельное пюре с котлетой' → Теплое и нежное блюдо, которое согреет душу и напомнит о доме\n"
+            f"весело, 'Радужный торт' → Яркий и красочный десерт, который поднимет настроение с первого взгляда\n"
+            f"злой, 'Острая курица карри' → Обжигающая острота поможет выпустить пар и оставит приятное послевкусие\n\n"
+            f"Верни ТОЛЬКО предложение, без пояснений."
+        )
+
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "model": DEEPSEEK_MODEL,
+            "messages": [{"role": "user", "content": instruction}],
+            "temperature": 0.7,
+            "max_tokens": 100
+        }
+
+        response = requests.post(
+            DEEPSEEK_URL,
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            return clean_deepseek_response(content)
+        else:
+            return f"Идеальное блюдо для вашего настроения!"
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении описания: {e}")
+        return f"Идеальное блюдо для вашего настроения!"
+
+
+def format_full_recipe(recipe: Dict) -> str:
+    """Форматирование полного рецепта с переводом на русский"""
+    try:
+        translated_title = translate_recipe_title(recipe.get('title', 'Рецепт'))
+        recipe_parts = []
+
+        if recipe.get('readyInMinutes'):
+            recipe_parts.append(f"⏱️ *Время:* {recipe['readyInMinutes']} минут")
+        if recipe.get('servings'):
+            recipe_parts.append(f"👥 *Порций:* {recipe['servings']}")
+
+        if recipe_parts:
+            recipe_parts.append("")
+
+        if recipe.get('extendedIngredients'):
+            recipe_parts.append("📝 *Ингредиенты:*")
+
+            ingredients_list = []
+            for ing in recipe['extendedIngredients']:
+                ingredients_list.append(f"• {ing.get('original', '')}")
+
+            ingredients_text = "\n".join(ingredients_list)
+
+            translated_ingredients = translate_with_deepseek(
+                ingredients_text,
+                "Переведи список ингредиентов на русский язык. Сохрани формат с точками в начале строки. "
+                "Переведи меры (teaspoon -> чайная ложка, cup -> стакан, tablespoon -> столовая ложка, cloves -> зубчики). "
+                "Названия продуктов переведи на русский. Сохрани все числа и меры."
+            )
+
+            recipe_parts.append(translated_ingredients if translated_ingredients else ingredients_text)
+            recipe_parts.append("")
+
+        if recipe.get('instructions'):
+            recipe_parts.append("*Приготовление:*")
+
+            instructions = recipe['instructions']
+            instructions = instructions.replace('<ol>', '').replace('</ol>', '')
+            instructions = instructions.replace('<li>', '• ').replace('</li>', '\n')
+            instructions = re.sub(r'<[^>]+>', '', instructions)
+
+            translated_instructions = translate_with_deepseek(
+                instructions,
+                "Переведи инструкцию по приготовлению на русский язык. "
+                "Сохрани формат с точками в начале шагов. "
+                "Переведи температуру (350°F -> 175°C, 400°F -> 200°C и т.д.). "
+                "Переведи все кулинарные термины понятно и подробно. "
+                "Сохрани нумерацию шагов если она есть."
+            )
+
+            recipe_parts.append(translated_instructions if translated_instructions else instructions)
+            recipe_parts.append("")
+
+        if recipe.get('sourceUrl'):
+            recipe_parts.append(f"[Полный рецепт (оригинал)]({recipe['sourceUrl']})")
+
+        full_recipe = "\n".join(recipe_parts)
+
+        return f"*{translated_title}*\n\n{full_recipe}"
+    except Exception as e:
+        logger.error(f"Ошибка форматирования рецепта: {e}")
+        return f"*Рецепт*\n\nИзвините, произошла ошибка при форматировании рецепта."
+
+
+def get_random_recipe() -> Optional[Dict]:
+    """Получение случайного рецепта с обработкой ошибок"""
+    params = {
+        'apiKey': SPOONACULAR_API_KEY,
+        'number': 1,
+        'sort': 'random'
+    }
+
+    try:
+        response = requests.get(
+            f"{SPOONACULAR_BASE_URL}/recipes/random",
+            params=params,
+            timeout=15
+        )
+
+        if response.status_code == 402:
+            logger.error("Превышен лимит запросов Spoonacular API")
+            return None
+
+        response.raise_for_status()
+        data = response.json()
+
+        if data and data.get('recipes') and len(data['recipes']) > 0:
+            recipe = data['recipes'][0]
+            return recipe
+        return None
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка получения случайного рецепта: {e}")
         return None
 
 
@@ -229,6 +358,11 @@ def get_recipe_details(recipe_id: int) -> Optional[Dict]:
             params=params,
             timeout=15
         )
+
+        if response.status_code == 402:
+            logger.error("Превышен лимит запросов Spoonacular API")
+            return None
+
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -237,13 +371,36 @@ def get_recipe_details(recipe_id: int) -> Optional[Dict]:
 
 
 def create_main_keyboard():
-    """Создание главной клавиатуры"""
+    """Создание главной клавиатуры с кнопками"""
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        telebot.types.KeyboardButton("🔍 Найти рецепт"),
-        telebot.types.KeyboardButton("❓ Помощь"),
+        telebot.types.KeyboardButton("🍽️ Случайный рецепт"),
+        telebot.types.KeyboardButton("😊 Рецепт по настроению"),
         telebot.types.KeyboardButton("🏠 Главное меню")
     )
+    return markup
+
+
+def create_emotions_keyboard():
+    """Создание клавиатуры с эмоциями для выбора"""
+    markup = telebot.types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
+    for emotion in AVAILABLE_EMOTIONS:
+        button = telebot.types.InlineKeyboardButton(
+            text=emotion.capitalize(),
+            callback_data=f"emotion_{emotion}"
+        )
+        buttons.append(button)
+
+    markup.add(*buttons)
+
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            text="Назад",
+            callback_data="back_to_main"
+        )
+    )
+
     return markup
 
 
@@ -253,33 +410,27 @@ def handle_api_errors(func):
         try:
             return func(message, *args, **kwargs)
         except requests.exceptions.Timeout:
-            bot.reply_to(message, "Превышено время ожидания. Попробуйте позже.")
+            bot.reply_to(message, "⏱️ Превышено время ожидания. Попробуйте позже.", reply_markup=create_main_keyboard())
         except requests.exceptions.ConnectionError:
-            bot.reply_to(message, "Ошибка соединения. Проверьте интернет.")
+            bot.reply_to(message, "🌐 Ошибка соединения. Проверьте интернет.", reply_markup=create_main_keyboard())
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-            bot.reply_to(message, "Произошла ошибка. Попробуйте еще раз.")
+            bot.reply_to(message, "Произошла ошибка. Попробуйте еще раз.", reply_markup=create_main_keyboard())
 
     return wrapper
 
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Обработчик команды /start"""
+    """Обработчик команды /start - приветствие"""
     welcome_text = (
-        "👨‍🍳 *Добро пожаловать в Кулинарного бота!*\n\n"
-        "🍽️ *Что я умею:*\n"
-        "• Понимать продукты на любом языке\n"
-        "• Искать рецепты по всему миру\n"
-        "• Переводить рецепты на русский\n"
-        "• Показывать подробные инструкции\n"
-        "• **Сортирую рецепты по количеству совпадений**\n\n"
+        "👨‍🍳 *Что умеет этот бот?*\n\n"
+        "Привет! Я умный кулинарный бот помощник.\n\n"
         "📋 *Команды:*\n"
-        "/start - это меню\n"
-        "/find продукты - поиск рецептов\n"
-        "/help - подробная справка\n\n"
-        "*Пример:* `/find курица картошка лук`\n\n"
-        "Приятного аппетита)"
+        "• /start - это меню\n"
+        "• /random - случайный рецепт\n"
+        "• /create - рецепт по настроению (с выбором эмоции)\n\n"
+        "Или просто нажми кнопку ниже!"
     )
 
     bot.send_message(
@@ -290,157 +441,206 @@ def start_command(message):
     )
 
 
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    """Подробная справка"""
-    help_text = (
-        "📚 *Подробная справка*\n\n"
-        "*Как это работает:*\n"
-        "1️⃣ Вы пишете продукты (на любом языке)\n"
-        "2️⃣ DeepSeek AI переводит их для поиска\n"
-        "3️⃣ Spoonacular находит рецепты\n"
-        "4️⃣ **Рецепты сортируются по количеству совпадений**\n"
-        "5️⃣ DeepSeek AI переводит рецепт на русский\n"
-        "6️⃣ Вы получаете готовый рецепт!\n\n"
-        "*Команды:*\n"
-        "• `/start` - Главное меню\n"
-        "• `/find [продукты]` - Поиск рецептов\n"
-        "  Пример: `/find курица рис лук`\n"
-        "• `/help` - Эта справка\n\n"
-        "*Кнопки:*\n"
-        "• 🔍 Найти рецепт - быстрый поиск\n"
-        "• ❓ Помощь - показать справку\n"
-        "• 🏠 Главное меню - вернуться\n\n"
-        "✨ *Особенности:*\n"
-        "• Понимает любой язык\n"
-        "• Сортирует по лучшему совпадению\n"
-        "• Полностью переводит рецепты\n"
-        "• Показывает фото блюд"
-    )
+@bot.message_handler(commands=['random'])
+@handle_api_errors
+def random_command(message):
+    """Обработчик команды /random - случайный рецепт"""
+    send_random_recipe(message)
+
+
+@bot.message_handler(commands=['create'])
+@handle_api_errors
+def create_command(message):
+    """Обработчик команды /create - показать выбор эмоций"""
+    emotions_text = "*Выберите ваше настроение из списка:*"
 
     bot.send_message(
         message.chat.id,
-        help_text,
+        emotions_text,
         parse_mode='Markdown',
-        reply_markup=create_main_keyboard()
+        reply_markup=create_emotions_keyboard()
     )
 
 
-@bot.message_handler(commands=['find'])
+@bot.callback_query_handler(func=lambda call: call.data.startswith('emotion_'))
 @handle_api_errors
-def find_command(message):
-    """Обработчик команды /find - поиск рецептов с сортировкой"""
-    command_parts = message.text.split(maxsplit=1)
+def emotion_callback_handler(call):
+    """Обработчик выбора эмоции из inline клавиатуры"""
+    emotion = call.data.replace('emotion_', '')
+    bot.edit_message_reply_markup(
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=None
+    )
 
-    if len(command_parts) < 2:
-        bot.reply_to(
-            message,
-            "*Напишите продукты после /find*\n\n"
-            "Пример: `/find курица картошка лук`",
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard()
-        )
-        return
+    bot.answer_callback_query(call.id, f"Ищу рецепт для настроения: {emotion}")
 
-    ingredients = [ing.strip() for ing in command_parts[1].split()]
+    class TempMessage:
+        def __init__(self, chat_id, text):
+            self.chat = type('obj', (object,), {'id': chat_id})
+            self.text = text
+            self.from_user = call.from_user
+            self.message_id = None
 
+    temp_message = TempMessage(call.message.chat.id, f"/create {emotion}")
+    process_emotion_recipe(temp_message, emotion)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_main")
+def back_to_main_callback(call):
+    """Обработчик кнопки возврата в главное меню"""
+    bot.answer_callback_query(call.id, "🏠 Возврат в меню")
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    start_command(call.message)
+
+
+@bot.message_handler(func=lambda message: message.text == "🍽️ Случайный рецепт")
+@handle_api_errors
+def random_recipe_button_handler(message):
+    """Обработчик кнопки случайного рецепта"""
+    send_random_recipe(message)
+
+
+@bot.message_handler(func=lambda message: message.text == "😊 Рецепт по настроению")
+@handle_api_errors
+def mood_recipe_button_handler(message):
+    """Обработчик кнопки рецепта по настроению"""
+    create_command(message)
+
+
+@bot.message_handler(func=lambda message: message.text == "🏠 Главное меню")
+def main_menu_button_handler(message):
+    """Обработчик кнопки главного меню"""
+    start_command(message)
+
+
+def process_emotion_recipe(message, emotion):
+    """Обработка рецепта по выбранной эмоции"""
     bot.send_chat_action(message.chat.id, 'typing')
-    status_msg = bot.reply_to(
-        message,
-        f"🔍 *Ищу и сортирую рецепты...*\n\n"
-        f"Продукты: {', '.join(ingredients)}",
+
+    status_msg = bot.send_message(
+        message.chat.id,
+        f"*Анализирую настроение:* {emotion}\n\n*Подбираю идеальный рецепт...*",
         parse_mode='Markdown'
     )
 
-    recipes = search_recipes_by_ingredients(ingredients, number=10)
+    recipes = search_recipes_by_emotion(emotion, number=5)
 
-    if not recipes:
+    if recipes and len(recipes) > 0:
+        selected_recipe = random.choice(recipes)
+        recipe_title = selected_recipe.get('title', 'блюдо')
+
         bot.edit_message_text(
-            "😔 *Рецепты не найдены*\n\n"
-            "Попробуйте:\n"
-            "• Другие продукты\n"
-            "• Меньше ингредиентов\n"
-            "• Основные продукты (мясо, овощи)",
+            f"*Настроение:* {emotion}\n\n"
+            f"*Нашел подходящий рецепт...*\n\n"
+            f"*Загружаю детали...*",
+            message.chat.id,
+            status_msg.message_id,
+            parse_mode='Markdown'
+        )
+
+        recipe_details = get_recipe_details(selected_recipe['id'])
+
+        if recipe_details:
+            bot.delete_message(message.chat.id, status_msg.message_id)
+
+            description = get_emotion_description(emotion, recipe_title)
+            recipe_text = format_full_recipe(recipe_details)
+
+            mood_header = f"😊 *Рецепт для настроения:* {emotion}\n💭 *Почему:* {description}\n\n"
+            recipe_text = mood_header + recipe_text
+
+            if recipe_details.get('image'):
+                if len(recipe_text) > 1000:
+                    bot.send_photo(
+                        message.chat.id,
+                        recipe_details['image']
+                    )
+                    bot.send_message(
+                        message.chat.id,
+                        recipe_text,
+                        parse_mode='Markdown',
+                        reply_markup=create_main_keyboard()
+                    )
+                else:
+                    bot.send_photo(
+                        message.chat.id,
+                        recipe_details['image'],
+                        caption=recipe_text,
+                        parse_mode='Markdown',
+                        reply_markup=create_main_keyboard()
+                    )
+            else:
+                bot.send_message(
+                    message.chat.id,
+                    recipe_text,
+                    parse_mode='Markdown',
+                    reply_markup=create_main_keyboard()
+                )
+        else:
+            translated_title = translate_recipe_title(recipe_title)
+            bot.edit_message_text(
+                f"😊 *Настроение:* {emotion}\n\n"
+                f"✨ *Рекомендую:* {translated_title}\n\n"
+                f"*К сожалению, не удалось загрузить полный рецепт.*\n"
+                f"Попробуйте еще раз!",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown',
+                reply_markup=create_main_keyboard()
+            )
+    else:
+        bot.edit_message_text(
+            f"😊 *Настроение:* {emotion}\n\n"
+            f"😔 *Не смог подобрать рецепт*\n\n"
+            f"Попробуйте другую эмоцию",
             message.chat.id,
             status_msg.message_id,
             parse_mode='Markdown',
             reply_markup=create_main_keyboard()
         )
-        return
-
-    bot.delete_message(message.chat.id, status_msg.message_id)
-
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-
-    for recipe in recipes[:5]:
-        translated_title = translate_recipe_title(recipe['title'])
-        callback_data = f"recipe_{recipe['id']}"
-
-        match_text = f"✅ {recipe['usedIngredientCount']} совп."
-
-        button_text = f"🍽️ {translated_title[:35]}... ({match_text})"
-
-        button = telebot.types.InlineKeyboardButton(
-            text=button_text,
-            callback_data=callback_data
-        )
-        markup.add(button)
-
-    markup.add(telebot.types.InlineKeyboardButton(
-        "🏠 В главное меню",
-        callback_data="back_to_main"
-    ))
-
-    info_text = (
-        f"✅ *Найдено рецептов:* {len(recipes)}\n"
-        f"👇 *Выберите рецепт для просмотра:*"
-    )
-
-    bot.send_message(
-        message.chat.id,
-        info_text,
-        parse_mode='Markdown',
-        reply_markup=markup
-    )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('recipe_'))
 @handle_api_errors
-def recipe_callback(call):
-    """Показ полного рецепта"""
-    recipe_id = int(call.data.split('_')[1])
-
-    bot.answer_callback_query(call.id, "Загружаю рецепт...")
-    bot.send_chat_action(call.message.chat.id, 'typing')
+def send_random_recipe(message):
+    """Отправка случайного рецепта"""
+    bot.send_chat_action(message.chat.id, 'typing')
 
     status_msg = bot.send_message(
-        call.message.chat.id,
-        "Это может занять несколько секунд...",
+        message.chat.id,
+        "🍳 *Ищу интересный рецепт...*",
         parse_mode='Markdown'
     )
 
-    recipe_details = get_recipe_details(recipe_id)
+    random_recipe = get_random_recipe()
 
-    if recipe_details:
+    recipe_details = None
+    if random_recipe and random_recipe.get('id'):
+        recipe_details = get_recipe_details(random_recipe['id'])
+
+    if not recipe_details:
+        recipe_details = random_recipe
+
+    bot.delete_message(message.chat.id, status_msg.message_id)
+
+    try:
         recipe_text = format_full_recipe(recipe_details)
 
-        bot.delete_message(call.message.chat.id, status_msg.message_id)
-
-        if recipe_details.get('image'):
+        if recipe_details and recipe_details.get('image'):
             if len(recipe_text) > 1000:
                 bot.send_photo(
-                    call.message.chat.id,
+                    message.chat.id,
                     recipe_details['image']
                 )
                 bot.send_message(
-                    call.message.chat.id,
+                    message.chat.id,
                     recipe_text,
                     parse_mode='Markdown',
                     reply_markup=create_main_keyboard()
                 )
             else:
                 bot.send_photo(
-                    call.message.chat.id,
+                    message.chat.id,
                     recipe_details['image'],
                     caption=recipe_text,
                     parse_mode='Markdown',
@@ -448,129 +648,24 @@ def recipe_callback(call):
                 )
         else:
             bot.send_message(
-                call.message.chat.id,
+                message.chat.id,
                 recipe_text,
                 parse_mode='Markdown',
                 reply_markup=create_main_keyboard()
             )
-    else:
-        bot.edit_message_text(
-            "😔 *Не удалось загрузить рецепт*",
-            call.message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard()
-        )
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_main")
-def back_to_main_callback(call):
-    """Возврат в главное меню"""
-    bot.answer_callback_query(call.id, "🏠 Возврат в меню")
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    start_command(call.message)
-
-
-@bot.message_handler(func=lambda message: message.text == "🔍 Найти рецепт")
-def find_button_handler(message):
-    """Кнопка поиска рецепта"""
-    bot.reply_to(
-        message,
-        "📝 *Введите продукты через пробел:*\n"
-        "Например: `курица картошка лук`",
-        parse_mode='Markdown'
-    )
-
-
-@bot.message_handler(func=lambda message: message.text == "❓ Помощь")
-def help_button_handler(message):
-    """Кнопка помощи"""
-    help_command(message)
-
-
-@bot.message_handler(func=lambda message: message.text == "🏠 Главное меню")
-def main_menu_button_handler(message):
-    """Кнопка главного меню"""
-    start_command(message)
-
-
-@bot.message_handler(func=lambda message: True)
-@handle_api_errors
-def text_handler(message):
-    """Обработка текстовых сообщений - поиск рецептов с сортировкой"""
-    if message.text.startswith('/'):
-        return
-
-    ingredients = [ing.strip() for ing in message.text.split()]
-
-    if len(ingredients) > 10:
-        bot.reply_to(
-            message,
-            "⚠️ *Слишком много продуктов*\n"
-            "Укажите не более 10 основных ингредиентов.",
-            parse_mode='Markdown'
-        )
-        return
-
-    status_msg = bot.reply_to(
-        message,
-        f"🔍 *Ищу и сортирую рецепты...*\n\n"
-        f"Продукты: {', '.join(ingredients)}",
-        parse_mode='Markdown'
-    )
-
-    recipes = search_recipes_by_ingredients(ingredients, number=10)
-
-    if not recipes:
-        bot.edit_message_text(
-            "😔 *Рецепты не найдены*\n\n"
-            "Попробуйте другие продукты или нажмите /help",
+    except Exception as e:
+        logger.error(f"Ошибка отправки рецепта: {e}")
+        bot.send_message(
             message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown',
+            "Произошла ошибка при отправке рецепта. Попробуйте еще раз.",
             reply_markup=create_main_keyboard()
         )
-        return
-
-    bot.delete_message(message.chat.id, status_msg.message_id)
-
-    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
-
-    for recipe in recipes[:5]:
-        translated_title = translate_recipe_title(recipe['title'])
-        callback_data = f"recipe_{recipe['id']}"
-
-        match_text = f"✅ {recipe['usedIngredientCount']} совп."
-
-        button_text = f"🍽️ {translated_title[:35]}... ({match_text})"
-
-        button = telebot.types.InlineKeyboardButton(
-            text=button_text,
-            callback_data=callback_data
-        )
-        markup.add(button)
-
-    markup.add(telebot.types.InlineKeyboardButton(
-        "🏠 В главное меню",
-        callback_data="back_to_main"
-    ))
-
-    info_text = (
-        f"✅ *Найдено рецептов:* {len(recipes)}\n"
-        f"👇 *Выберите рецепт:*"
-    )
-
-    bot.send_message(
-        message.chat.id,
-        info_text,
-        parse_mode='Markdown',
-        reply_markup=markup
-    )
 
 
 def main():
     """Запуск бота"""
-    logger.info("🚀 Бот запущен и готов к работе!")
+    logger.info("Бот запущен и готов к работе!")
+    bot.remove_webhook()
 
     while True:
         try:
