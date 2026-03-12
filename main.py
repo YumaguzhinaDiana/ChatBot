@@ -9,7 +9,8 @@ from functools import wraps
 import re
 import random
 from transformer import UniversalDietDetector
-
+from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,20 +22,18 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 SPOONACULAR_API_KEY = os.getenv('SPOONACULAR_API_KEY')
-DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+GIGACHAT_API_KEY = os.getenv('GIGACHAT_API_KEY')
 HUGGINGFACE_API_KEY = os.getenv('HUGGINGFACE_API_KEY')
 
-
-if not TELEGRAM_TOKEN or not SPOONACULAR_API_KEY or not DEEPSEEK_API_KEY or not HUGGINGFACE_API_KEY:
+if not TELEGRAM_TOKEN or not SPOONACULAR_API_KEY or not GIGACHAT_API_KEY or not HUGGINGFACE_API_KEY:
     raise ValueError("Не найдены токены в .env файле")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 SPOONACULAR_BASE_URL = "https://api.spoonacular.com"
-DEEPSEEK_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek/deepseek-r1"
 diet_detector = UniversalDietDetector(HUGGINGFACE_API_KEY)
 
+giga = GigaChat(credentials=GIGACHAT_API_KEY, verify_ssl_certs=False)
 
 selected_command = ""
 
@@ -45,27 +44,30 @@ AVAILABLE_EMOTIONS = [
 ]
 
 
-def clean_deepseek_response(text: str) -> str:
-    """Очистка ответа DeepSeek от тегов и лишнего текста"""
+def clean_gigachat_response(text: str) -> str:
+    """Очистка ответа GigaChat от лишнего текста"""
     if not text:
         return ""
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<[^>]+>', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
-def translate_with_deepseek(text: str, instruction: str) -> str:
-    """Универсальная функция для перевода/обработки текста через DeepSeek"""
-    if not text or not DEEPSEEK_API_KEY:
+def escape_markdown(text: str) -> str:
+    """Экранирование специальных символов Markdown"""
+    if not text:
+        return ""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+def translate_with_gigachat(text: str, instruction: str) -> str:
+    """Универсальная функция для перевода/обработки текста через GigaChat"""
+    if not text or not GIGACHAT_API_KEY:
         return text
 
     try:
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
         enhanced_instruction = instruction + "\n\n"
         enhanced_instruction += "Пример перевода ингредиентов:\n"
         enhanced_instruction += "• 1 teaspoon Allspice -> • 1 чайная ложка душистого перца\n"
@@ -78,30 +80,28 @@ def translate_with_deepseek(text: str, instruction: str) -> str:
         enhanced_instruction += "• 1 large Onion -> • 1 большая луковица\n\n"
         enhanced_instruction += f"Текст для перевода:\n{text}"
 
-        data = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [{"role": "user", "content": enhanced_instruction}],
-            "temperature": 0.3,
-            "max_tokens": 2000
-        }
-
-        response = requests.post(
-            DEEPSEEK_URL,
-            headers=headers,
-            json=data,
-            timeout=30
+        payload = Chat(
+            messages=[
+                Messages(
+                    role=MessagesRole.USER,
+                    content=enhanced_instruction
+                )
+            ],
+            temperature=0.3,
+            max_tokens=2000
         )
 
-        if response.status_code == 200:
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            return clean_deepseek_response(content)
+        response = giga.chat(payload)
+
+        if response and response.choices:
+            content = response.choices[0].message.content
+            return clean_gigachat_response(content)
         else:
-            logger.error(f"Ошибка DeepSeek API: {response.status_code}")
+            logger.error("Пустой ответ от GigaChat")
             return text
 
     except Exception as e:
-        logger.error(f"Ошибка при обращении к DeepSeek: {e}")
+        logger.error(f"Ошибка при обращении к GigaChat: {e}")
         return text
 
 
@@ -114,12 +114,12 @@ def translate_recipe_title(title: str) -> str:
         "Переведи название рецепта на русский язык. "
         "Верни ТОЛЬКО переведенное название, без пояснений."
     )
-    translated = translate_with_deepseek(title, instruction)
+    translated = translate_with_gigachat(title, instruction)
     return translated if translated else title
 
 
 def get_search_query_by_emotion(emotion: str) -> str:
-    """Получение поискового запроса для Spoonacular по эмоции через DeepSeek"""
+    """Получение поискового запроса для Spoonacular по эмоции через GigaChat"""
     try:
         instruction = (
             f"Пользователь чувствует '{emotion}'. Придумай ОДИН поисковый запрос на АНГЛИЙСКОМ языке "
@@ -132,33 +132,26 @@ def get_search_query_by_emotion(emotion: str) -> str:
             f"Верни ТОЛЬКО поисковый запрос, без пояснений и дополнительного текста."
         )
 
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [{"role": "user", "content": instruction}],
-            "temperature": 0.5,
-            "max_tokens": 50
-        }
-
-        response = requests.post(
-            DEEPSEEK_URL,
-            headers=headers,
-            json=data,
-            timeout=30
+        payload = Chat(
+            messages=[
+                Messages(
+                    role=MessagesRole.USER,
+                    content=instruction
+                )
+            ],
+            temperature=0.5,
+            max_tokens=50
         )
 
-        if response.status_code == 200:
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            query = clean_deepseek_response(content).strip().lower()
-            logger.info(f"DeepSeek сгенерировал запрос для эмоции '{emotion}': {query}")
+        response = giga.chat(payload)
+
+        if response and response.choices:
+            content = response.choices[0].message.content
+            query = clean_gigachat_response(content).strip().lower()
+            logger.info(f"GigaChat сгенерировал запрос для эмоции '{emotion}': {query}")
             return query
         else:
-            logger.error(f"Ошибка DeepSeek API: {response.status_code}")
+            logger.error("Пустой ответ от GigaChat")
             return "food"
 
     except Exception as e:
@@ -226,29 +219,22 @@ def get_emotion_description(emotion: str, recipe_title: str) -> str:
             f"Верни ТОЛЬКО предложение, без пояснений."
         )
 
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        data = {
-            "model": DEEPSEEK_MODEL,
-            "messages": [{"role": "user", "content": instruction}],
-            "temperature": 0.7,
-            "max_tokens": 100
-        }
-
-        response = requests.post(
-            DEEPSEEK_URL,
-            headers=headers,
-            json=data,
-            timeout=30
+        payload = Chat(
+            messages=[
+                Messages(
+                    role=MessagesRole.USER,
+                    content=instruction
+                )
+            ],
+            temperature=0.7,
+            max_tokens=100
         )
 
-        if response.status_code == 200:
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            return clean_deepseek_response(content)
+        response = giga.chat(payload)
+
+        if response and response.choices:
+            content = response.choices[0].message.content
+            return clean_gigachat_response(content)
         else:
             return f"Идеальное блюдо для вашего настроения!"
 
@@ -280,7 +266,7 @@ def format_full_recipe(recipe: Dict) -> str:
 
             ingredients_text = "\n".join(ingredients_list)
 
-            translated_ingredients = translate_with_deepseek(
+            translated_ingredients = translate_with_gigachat(
                 ingredients_text,
                 "Переведи список ингредиентов на русский язык. Сохрани формат с точками в начале строки. "
                 "Переведи меры (teaspoon -> чайная ложка, cup -> стакан, tablespoon -> столовая ложка, cloves -> зубчики). "
@@ -298,7 +284,7 @@ def format_full_recipe(recipe: Dict) -> str:
             instructions = instructions.replace('<li>', '• ').replace('</li>', '\n')
             instructions = re.sub(r'<[^>]+>', '', instructions)
 
-            translated_instructions = translate_with_deepseek(
+            translated_instructions = translate_with_gigachat(
                 instructions,
                 "Переведи инструкцию по приготовлению на русский язык. "
                 "Сохрани формат с точками в начале шагов. "
@@ -422,12 +408,61 @@ def handle_api_errors(func):
         try:
             return func(message, *args, **kwargs)
         except requests.exceptions.Timeout:
-            bot.reply_to(message, "⏱️ Превышено время ожидания. Попробуйте позже.", reply_markup=create_main_keyboard())
+            error_text = "⏱️ Превышено время ожидания. Попробуйте позже."
+            if hasattr(message, 'message') and hasattr(message.message, 'chat'):
+                bot.send_message(
+                    message.message.chat.id,
+                    error_text,
+                    reply_markup=create_main_keyboard()
+                )
+            else:
+                bot.reply_to(message, error_text, reply_markup=create_main_keyboard())
         except requests.exceptions.ConnectionError:
-            bot.reply_to(message, "🌐 Ошибка соединения. Проверьте интернет.", reply_markup=create_main_keyboard())
+            error_text = "🌐 Ошибка соединения. Проверьте интернет."
+            if hasattr(message, 'message') and hasattr(message.message, 'chat'):
+                bot.send_message(
+                    message.message.chat.id,
+                    error_text,
+                    reply_markup=create_main_keyboard()
+                )
+            else:
+                bot.reply_to(message, error_text, reply_markup=create_main_keyboard())
+        except telebot.apihelper.ApiTelegramException as e:
+            if "message is not modified" in str(e):
+                logger.debug("Сообщение не было изменено")
+                pass
+            elif "can't parse entities" in str(e):
+                error_text = "Произошла ошибка форматирования. Попробуйте еще раз."
+                if hasattr(message, 'message') and hasattr(message.message, 'chat'):
+                    bot.send_message(
+                        message.message.chat.id,
+                        error_text,
+                        reply_markup=create_main_keyboard()
+                    )
+                else:
+                    bot.reply_to(message, error_text, reply_markup=create_main_keyboard())
+            else:
+                logger.error(f"Telegram API ошибка: {e}")
+                error_text = f"Произошла ошибка. Попробуйте еще раз."
+                if hasattr(message, 'message') and hasattr(message.message, 'chat'):
+                    bot.send_message(
+                        message.message.chat.id,
+                        error_text,
+                        reply_markup=create_main_keyboard()
+                    )
+                else:
+                    bot.reply_to(message, error_text, reply_markup=create_main_keyboard())
         except Exception as e:
             logger.error(f"Ошибка: {e}")
-            bot.reply_to(message, "Произошла ошибка. Попробуйте еще раз.", reply_markup=create_main_keyboard())
+            error_text = "Произошла ошибка. Попробуйте еще раз."
+            if hasattr(message, 'message') and hasattr(message.message, 'chat'):
+                bot.send_message(
+                    message.message.chat.id,
+                    error_text,
+                    reply_markup=create_main_keyboard()
+                )
+            else:
+                bot.reply_to(message, error_text, reply_markup=create_main_keyboard())
 
     return wrapper
 
@@ -453,6 +488,7 @@ def start_command(message):
         reply_markup=create_main_keyboard()
     )
 
+
 @bot.message_handler(commands=['random'])
 @handle_api_errors
 def random_command(message):
@@ -472,6 +508,7 @@ def create_command(message):
         parse_mode='Markdown',
         reply_markup=create_emotions_keyboard()
     )
+
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
@@ -525,41 +562,29 @@ def help_command(message):
 def emotion_callback_handler(call):
     """Обработчик выбора эмоции из inline клавиатуры"""
     emotion = call.data.replace('emotion_', '')
-    bot.edit_message_reply_markup(
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=None
-    )
+
+    try:
+        bot.edit_message_reply_markup(
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=None
+        )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "message is not modified" in str(e):
+            pass
+        else:
+            raise e
 
     bot.answer_callback_query(call.id, f"Ищу рецепт для настроения: {emotion}")
 
     class TempMessage:
-        def __init__(self, chat_id, text):
+        def __init__(self, chat_id, text, user_id):
             self.chat = type('obj', (object,), {'id': chat_id})
             self.text = text
-            self.from_user = call.from_user
+            self.from_user = type('obj', (object,), {'id': user_id})
             self.message_id = None
 
-    temp_message = TempMessage(call.message.chat.id, f"/create {emotion}")
-    process_emotion_recipe(temp_message, emotion)
-
-def find_command(message):
-    """Обработчик команды /find - поиск рецептов с сортировкой"""
-
-    global selected_command
-    selected_command = "search_ingredients"
-    command_parts = message.text.split(maxsplit=1)
-
-    bot.answer_callback_query(call.id, f"Ищу рецепт для настроения: {emotion}")
-
-    class TempMessage:
-        def __init__(self, chat_id, text):
-            self.chat = type('obj', (object,), {'id': chat_id})
-            self.text = text
-            self.from_user = call.from_user
-            self.message_id = None
-
-    temp_message = TempMessage(call.message.chat.id, f"/create {emotion}")
+    temp_message = TempMessage(call.message.chat.id, f"/create {emotion}", call.from_user.id)
     process_emotion_recipe(temp_message, emotion)
 
 
@@ -583,6 +608,112 @@ def main_menu_button_handler(message):
     start_command(message)
 
 
+def format_full_recipe(recipe: Dict) -> str:
+    """Форматирование полного рецепта с переводом на русский"""
+    try:
+        translated_title = translate_recipe_title(recipe.get('title', 'Рецепт'))
+        recipe_parts = []
+
+        if recipe.get('readyInMinutes'):
+            recipe_parts.append(f"⏱️ *Время:* {recipe['readyInMinutes']} минут")
+        if recipe.get('servings'):
+            recipe_parts.append(f"👥 *Порций:* {recipe['servings']}")
+
+        if recipe_parts:
+            recipe_parts.append("")
+
+        if recipe.get('extendedIngredients'):
+            recipe_parts.append("📝 *Ингредиенты:*")
+
+            ingredients_list = []
+            for ing in recipe['extendedIngredients']:
+                ingredients_list.append(f"• {ing.get('original', '')}")
+
+            ingredients_text = "\n".join(ingredients_list)
+
+            translated_ingredients = translate_with_gigachat(
+                ingredients_text,
+                "Переведи список ингредиентов на русский язык. Сохрани формат с точками в начале строки. "
+                "Переведи меры (teaspoon -> чайная ложка, cup -> стакан, tablespoon -> столовая ложка, cloves -> зубчики). "
+                "Названия продуктов переведи на русский. Сохрани все числа и меры."
+            )
+
+            recipe_parts.append(translated_ingredients if translated_ingredients else ingredients_text)
+            recipe_parts.append("")
+
+        if recipe.get('instructions'):
+            recipe_parts.append("*Приготовление:*")
+
+            instructions = recipe['instructions']
+            instructions = instructions.replace('<ol>', '').replace('</ol>', '')
+            instructions = instructions.replace('<li>', '• ').replace('</li>', '\n')
+            instructions = re.sub(r'<[^>]+>', '', instructions)
+
+            translated_instructions = translate_with_gigachat(
+                instructions,
+                "Переведи инструкцию по приготовлению на русский язык. "
+                "Сохрани формат с точками в начале шагов. "
+                "Переведи температуру (350°F -> 175°C, 400°F -> 200°C и т.д.). "
+                "Переведи все кулинарные термины понятно и подробно. "
+                "Сохрани нумерацию шагов если она есть."
+            )
+
+            recipe_parts.append(translated_instructions if translated_instructions else instructions)
+            recipe_parts.append("")
+
+        if recipe.get('sourceUrl'):
+            recipe_parts.append(f"[Полный рецепт (оригинал)]({recipe['sourceUrl']})")
+
+        full_recipe = "\n".join(recipe_parts)
+
+        return f"*{translated_title}*\n\n{full_recipe}"
+    except Exception as e:
+        logger.error(f"Ошибка форматирования рецепта: {e}")
+        return f"*Рецепт*\n\nИзвините, произошла ошибка при форматировании рецепта."
+
+
+def send_recipe_with_photo(chat_id, photo_url, recipe_text, reply_markup=None):
+    """Отправка рецепта с фото, автоматически разделяя если текст太长"""
+    try:
+        if len(recipe_text) <= 1024:
+            bot.send_photo(
+                chat_id,
+                photo_url,
+                caption=recipe_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        else:
+            bot.send_photo(
+                chat_id,
+                photo_url
+            )
+            bot.send_message(
+                chat_id,
+                recipe_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+    except telebot.apihelper.ApiTelegramException as e:
+        if "can't parse entities" in str(e):
+            if len(recipe_text) <= 1024:
+                bot.send_photo(
+                    chat_id,
+                    photo_url,
+                    caption=recipe_text.replace('*', '').replace('_', ''),
+                    reply_markup=reply_markup
+                )
+            else:
+                bot.send_photo(chat_id, photo_url)
+                bot.send_message(
+                    chat_id,
+                    recipe_text.replace('*', '').replace('_', ''),
+                    reply_markup=reply_markup
+                )
+        else:
+            raise e
+
+
 def process_emotion_recipe(message, emotion):
     """Обработка рецепта по выбранной эмоции"""
     bot.send_chat_action(message.chat.id, 'typing')
@@ -599,19 +730,25 @@ def process_emotion_recipe(message, emotion):
         selected_recipe = random.choice(recipes)
         recipe_title = selected_recipe.get('title', 'блюдо')
 
-        bot.edit_message_text(
-            f"*Настроение:* {emotion}\n\n"
-            f"*Нашел подходящий рецепт...*\n\n"
-            f"*Загружаю детали...*",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.edit_message_text(
+                f"*Настроение:* {emotion}\n\n"
+                f"*Нашел подходящий рецепт...*\n\n"
+                f"*Загружаю детали...*",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
 
         recipe_details = get_recipe_details(selected_recipe['id'])
 
         if recipe_details:
-            bot.delete_message(message.chat.id, status_msg.message_id)
+            try:
+                bot.delete_message(message.chat.id, status_msg.message_id)
+            except Exception as e:
+                logger.error(f"Ошибка при удалении сообщения: {e}")
 
             description = get_emotion_description(emotion, recipe_title)
             recipe_text = format_full_recipe(recipe_details)
@@ -620,54 +757,72 @@ def process_emotion_recipe(message, emotion):
             recipe_text = mood_header + recipe_text
 
             if recipe_details.get('image'):
-                if len(recipe_text) > 1000:
-                    bot.send_photo(
-                        message.chat.id,
-                        recipe_details['image']
-                    )
+                send_recipe_with_photo(
+                    message.chat.id,
+                    recipe_details['image'],
+                    recipe_text,
+                    create_main_keyboard()
+                )
+            else:
+                try:
                     bot.send_message(
                         message.chat.id,
                         recipe_text,
                         parse_mode='Markdown',
                         reply_markup=create_main_keyboard()
                     )
-                else:
-                    bot.send_photo(
-                        message.chat.id,
-                        recipe_details['image'],
-                        caption=recipe_text,
-                        parse_mode='Markdown',
-                        reply_markup=create_main_keyboard()
-                    )
-            else:
-                bot.send_message(
+                except telebot.apihelper.ApiTelegramException as e:
+                    if "can't parse entities" in str(e):
+                        bot.send_message(
+                            message.chat.id,
+                            recipe_text.replace('*', '').replace('_', ''),
+                            reply_markup=create_main_keyboard()
+                        )
+                    else:
+                        raise e
+        else:
+            translated_title = translate_recipe_title(recipe_title)
+            try:
+                bot.edit_message_text(
+                    f"🎭 *Настроение:* {emotion}\n\n"
+                    f"✨ *Рекомендую:* {translated_title}\n\n"
+                    f"*К сожалению, не удалось загрузить полный рецепт.*\n"
+                    f"Попробуйте еще раз!",
                     message.chat.id,
-                    recipe_text,
+                    status_msg.message_id,
                     parse_mode='Markdown',
                     reply_markup=create_main_keyboard()
                 )
-        else:
-            translated_title = translate_recipe_title(recipe_title)
+            except Exception as e:
+                logger.error(f"Ошибка при редактировании сообщения: {e}")
+                bot.send_message(
+                    message.chat.id,
+                    f"🎭 Настроение: {emotion}\n\n"
+                    f"✨ Рекомендую: {translated_title}\n\n"
+                    f"К сожалению, не удалось загрузить полный рецепт.\n"
+                    f"Попробуйте еще раз!",
+                    reply_markup=create_main_keyboard()
+                )
+    else:
+        try:
             bot.edit_message_text(
                 f"🎭 *Настроение:* {emotion}\n\n"
-                f"✨ *Рекомендую:* {translated_title}\n\n"
-                f"*К сожалению, не удалось загрузить полный рецепт.*\n"
-                f"Попробуйте еще раз!",
+                f"😔 *Не смог подобрать рецепт*\n\n"
+                f"Попробуйте другую эмоцию",
                 message.chat.id,
                 status_msg.message_id,
                 parse_mode='Markdown',
                 reply_markup=create_main_keyboard()
             )
-    else:
-        bot.edit_message_text(
-            f"🎭 *Настроение:* {emotion}\n\n"
-            f"😔 *Не смог подобрать рецепт*\n\n"
-            f"Попробуйте другую эмоцию",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown',
-            reply_markup=create_main_keyboard()
-        )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            bot.send_message(
+                message.chat.id,
+                f"🎭 Настроение: {emotion}\n\n"
+                f"😔 Не смог подобрать рецепт\n\n"
+                f"Попробуйте другую эмоцию",
+                reply_markup=create_main_keyboard()
+            )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('recipe_'))
@@ -690,44 +845,112 @@ def recipe_callback(call):
     if recipe_details:
         recipe_text = format_full_recipe(recipe_details)
 
-        bot.delete_message(call.message.chat.id, status_msg.message_id)
+        try:
+            bot.delete_message(call.message.chat.id, status_msg.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщения: {e}")
 
         if recipe_details.get('image'):
-            if len(recipe_text) > 1000:
-                bot.send_photo(
-                    call.message.chat.id,
-                    recipe_details['image']
-                )
+            send_recipe_with_photo(
+                call.message.chat.id,
+                recipe_details['image'],
+                recipe_text,
+                create_main_keyboard()
+            )
+        else:
+            try:
                 bot.send_message(
                     call.message.chat.id,
                     recipe_text,
                     parse_mode='Markdown',
                     reply_markup=create_main_keyboard()
                 )
-            else:
-                bot.send_photo(
-                    call.message.chat.id,
-                    recipe_details['image'],
-                    caption=recipe_text,
-                    parse_mode='Markdown',
-                    reply_markup=create_main_keyboard()
-                )
-        else:
-            bot.send_message(
+            except telebot.apihelper.ApiTelegramException as e:
+                if "can't parse entities" in str(e):
+                    bot.send_message(
+                        call.message.chat.id,
+                        recipe_text.replace('*', '').replace('_', ''),
+                        reply_markup=create_main_keyboard()
+                    )
+                else:
+                    raise e
+    else:
+        try:
+            bot.edit_message_text(
+                "😔 *Не удалось загрузить рецепт*",
                 call.message.chat.id,
-                recipe_text,
+                status_msg.message_id,
                 parse_mode='Markdown',
                 reply_markup=create_main_keyboard()
             )
-    else:
-        bot.edit_message_text(
-            "😔 *Не удалось загрузить рецепт*",
-            call.message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown',
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
+            bot.send_message(
+                call.message.chat.id,
+                "😔 Не удалось загрузить рецепт",
+                reply_markup=create_main_keyboard()
+            )
+
+
+@handle_api_errors
+def send_random_recipe(message):
+    """Отправка случайного рецепта"""
+    bot.send_chat_action(message.chat.id, 'typing')
+
+    status_msg = bot.send_message(
+        message.chat.id,
+        "🍳 *Ищу интересный рецепт...*",
+        parse_mode='Markdown'
+    )
+
+    random_recipe = get_random_recipe()
+
+    recipe_details = None
+    if random_recipe and random_recipe.get('id'):
+        recipe_details = get_recipe_details(random_recipe['id'])
+
+    if not recipe_details:
+        recipe_details = random_recipe
+
+    try:
+        bot.delete_message(message.chat.id, status_msg.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
+
+    try:
+        recipe_text = format_full_recipe(recipe_details)
+
+        if recipe_details and recipe_details.get('image'):
+            send_recipe_with_photo(
+                message.chat.id,
+                recipe_details['image'],
+                recipe_text,
+                create_main_keyboard()
+            )
+        else:
+            try:
+                bot.send_message(
+                    message.chat.id,
+                    recipe_text,
+                    parse_mode='Markdown',
+                    reply_markup=create_main_keyboard()
+                )
+            except telebot.apihelper.ApiTelegramException as e:
+                if "can't parse entities" in str(e):
+                    bot.send_message(
+                        message.chat.id,
+                        recipe_text.replace('*', '').replace('_', ''),
+                        reply_markup=create_main_keyboard()
+                    )
+                else:
+                    raise e
+    except Exception as e:
+        logger.error(f"Ошибка отправки рецепта: {e}")
+        bot.send_message(
+            message.chat.id,
+            "Произошла ошибка при отправке рецепта. Попробуйте еще раз.",
             reply_markup=create_main_keyboard()
         )
-
 
 @bot.message_handler(commands=['diet_find'])
 @handle_api_errors
@@ -744,7 +967,7 @@ def diet_find_command(message):
             reply_markup=create_main_keyboard()
         )
         return
-    selected_command ="diet_search"
+    selected_command = "diet_search"
     diet_analysis = diet_detector.analyze(message.text)
 
     if diet_analysis['all_restrictions']:
@@ -789,7 +1012,6 @@ def diet_find_command(message):
         translated_title = translate_recipe_title(recipe['title'])
         callback_data = f"recipe_{recipe['id']}"
 
-
         button_text = f"🎲 {translated_title[:35]}"
 
         button = telebot.types.InlineKeyboardButton(
@@ -826,14 +1048,14 @@ def translate_ingredients_to_english(ingredients: List[str]) -> List[str]:
         "Ингредиенты состоящие из двух и более слов должны считаться как один ингредиент"
     )
 
-    result = translate_with_deepseek(ingredients_text, instruction)
+    result = translate_with_gigachat(ingredients_text, instruction)
 
     translated = [item.strip().lower() for item in result.split(',') if item.strip()]
 
     if not translated:
         return [ing.lower() for ing in ingredients]
 
-    logger.info(f"DeepSeek перевел: {ingredients} -> {translated}")
+    logger.info(f"GigaChat перевел: {ingredients} -> {translated}")
     return translated
 
 
@@ -875,74 +1097,25 @@ def search_recipes_by_ingredients(ingredients: List[str], number: int = 10) -> O
         return None
 
 
-@handle_api_errors
-def send_random_recipe(message):
-    """Отправка случайного рецепта"""
-    bot.send_chat_action(message.chat.id, 'typing')
-
-    status_msg = bot.send_message(
-        message.chat.id,
-        "🍳 *Ищу интересный рецепт...*",
-        parse_mode='Markdown'
-    )
-
-    random_recipe = get_random_recipe()
-
-    recipe_details = None
-    if random_recipe and random_recipe.get('id'):
-        recipe_details = get_recipe_details(random_recipe['id'])
-
-    if not recipe_details:
-        recipe_details = random_recipe
-
-    bot.delete_message(message.chat.id, status_msg.message_id)
-
-    try:
-        recipe_text = format_full_recipe(recipe_details)
-
-        if recipe_details and recipe_details.get('image'):
-            if len(recipe_text) > 1000:
-                bot.send_photo(
-                    message.chat.id,
-                    recipe_details['image']
-                )
-                bot.send_message(
-                    message.chat.id,
-                    recipe_text,
-                    parse_mode='Markdown',
-                    reply_markup=create_main_keyboard()
-                )
-            else:
-                bot.send_photo(
-                    message.chat.id,
-                    recipe_details['image'],
-                    caption=recipe_text,
-                    parse_mode='Markdown',
-                    reply_markup=create_main_keyboard()
-                )
-        else:
-            bot.send_message(
-                message.chat.id,
-                recipe_text,
-                parse_mode='Markdown',
-                reply_markup=create_main_keyboard()
-            )
-    except Exception as e:
-        logger.error(f"Ошибка отправки рецепта: {e}")
-        bot.send_message(
-            message.chat.id,
-            "Произошла ошибка при отправке рецепта. Попробуйте еще раз.",
-            reply_markup=create_main_keyboard()
-        )
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_main")
 def back_to_main_callback(call):
     """Возврат в главное меню"""
     bot.answer_callback_query(call.id, "🏠 Возврат в меню")
-    bot.delete_message(call.message.chat.id, call.message.message_id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
 
-    start_command(call.message)
+    class TempMessage:
+        def __init__(self, chat_id, user_id):
+            self.chat = type('obj', (object,), {'id': chat_id})
+            self.from_user = type('obj', (object,), {'id': user_id})
+            self.text = "/start"
+            self.message_id = None
+
+    temp_message = TempMessage(call.message.chat.id, call.from_user.id)
+    start_command(temp_message)
 
 
 @bot.message_handler(func=lambda message: message.text == "🔎 Рецепт по названию")
@@ -970,13 +1143,14 @@ def find_button_handler(message):
         parse_mode='Markdown'
     )
 
+
 @bot.message_handler(func=lambda message: message.text == "🍴 Рецепты с учетом ограничений")
-def find_button_handler(message):
-    """Кнопка поиска рецепта"""
+def diet_button_handler(message):
+    """Кнопка поиска рецепта с учетом ограничений"""
     global selected_command
     bot.reply_to(
         message,
-       "🥗 *Диетический поиск*\n\n"
+        "🥗 *Диетический поиск*\n\n"
         "Введите ваши ограничения в одном сообщении.\n\n"
         "*Форматы:*\n"
         "• С продуктами: `веган без хлеба`\n"
@@ -1026,12 +1200,15 @@ def text_handler(message):
             )
             return
 
-        bot.edit_message_text(
-            "🔍 *Ищу подходящие рецепты...*",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.edit_message_text(
+                "🔍 *Ищу подходящие рецепты...*",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
 
         recipes = search_recipes_by_ingredients(ingredients, number=10)
         logger.info(recipes)
@@ -1047,12 +1224,15 @@ def text_handler(message):
                 parse_mode='Markdown'
             )
 
-        bot.edit_message_text(
-            "🔍 *Ищу подходящие рецепты...*",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.edit_message_text(
+                "🔍 *Ищу подходящие рецепты...*",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
 
         recipes = search_with_diet(diet_analysis)
         logger.info(recipes)
@@ -1060,18 +1240,24 @@ def text_handler(message):
     elif selected_command == "search_name":
         search_query = message.text
 
-        bot.edit_message_text(
-            "🔍 *Ищу подходящие рецепты...*",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.edit_message_text(
+                "🔍 *Ищу подходящие рецепты...*",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
 
         recipes = search_recipe_by_name(search_query)
 
-    if len(recipes)==0  or not recipes:
+    if len(recipes) == 0 or not recipes:
         logger.info(f"Найдено рецептов: {len(recipes)}")
-        bot.delete_message(message.chat.id, status_msg.message_id)
+        try:
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при удалении сообщения: {e}")
 
         bot.send_message(
             message.chat.id,
@@ -1083,7 +1269,10 @@ def text_handler(message):
         return
 
     logger.info("continue")
-    bot.delete_message(message.chat.id, status_msg.message_id)
+    try:
+        bot.delete_message(message.chat.id, status_msg.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
 
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
 
@@ -1135,7 +1324,6 @@ def search_with_diet(diet_analysis: Dict) -> Optional[Dict]:
     params['sort'] = 'popularity'
 
     logger.info(f"Параметры запроса: {params}")
-    logger.info(f"Параметры запроса: {type(params)}")
     try:
         response = requests.get(
             f"{SPOONACULAR_BASE_URL}/recipes/complexSearch",
@@ -1160,7 +1348,6 @@ def search_with_diet(diet_analysis: Dict) -> Optional[Dict]:
 def search_recipe_by_name(recipe_name: str, number: int = 8) -> Optional[List[Dict]]:
     """
     Поиск рецептов по названию через Spoonacular API
-
     """
     recipe_name1 = diet_detector.translate_to_english_title(recipe_name)
     logger.info(f"transleted name: {recipe_name} -> {recipe_name1}")
@@ -1229,21 +1416,27 @@ def search_recipe_command(message):
 
     recipes = search_recipe_by_name(search_query)
 
-    if not recipes or len(recipes)==0:
+    if not recipes or len(recipes) == 0:
         logger.info("recipes not found")
-        bot.edit_message_text(
-            f"😔 По запросу '{search_query}' ничего не найдено.\n\n"
-            "Попробуйте:\n"
-            "• Другое название\n"
-            "• Более короткий запрос\n"
-            "• Проверить орфографию",
-            message.chat.id,
-            status_msg.message_id,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.edit_message_text(
+                f"😔 По запросу '{search_query}' ничего не найдено.\n\n"
+                "Попробуйте:\n"
+                "• Другое название\n"
+                "• Более короткий запрос\n"
+                "• Проверить орфографию",
+                message.chat.id,
+                status_msg.message_id,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при редактировании сообщения: {e}")
         return
 
-    bot.delete_message(message.chat.id, status_msg.message_id)
+    try:
+        bot.delete_message(message.chat.id, status_msg.message_id)
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщения: {e}")
 
     markup = telebot.types.InlineKeyboardMarkup(row_width=1)
 
@@ -1273,6 +1466,7 @@ def search_recipe_command(message):
         parse_mode='Markdown',
         reply_markup=markup
     )
+
 
 def main():
     """Запуск бота"""
