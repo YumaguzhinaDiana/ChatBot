@@ -148,10 +148,10 @@ def get_search_query_by_emotion(emotion: str) -> str:
         if response and response.choices:
             content = response.choices[0].message.content
             query = clean_gigachat_response(content).strip().lower()
-            logger.info(f"GigaChat сгенерировал запрос для эмоции '{emotion}': {query}")
+            logger.info(f"ИИ сгенерировал запрос для эмоции '{emotion}': {query}")
             return query
         else:
-            logger.error("Пустой ответ от GigaChat")
+            logger.error("Пустой ответ от ИИ")
             return "food"
 
     except Exception as e:
@@ -374,7 +374,8 @@ def create_main_keyboard():
         telebot.types.KeyboardButton("🔍 Рецепт по ингредиентам"),
         telebot.types.KeyboardButton("🍴 Рецепты с учетом ограничений"),
         telebot.types.KeyboardButton("❓ Помощь"),
-        telebot.types.KeyboardButton("🏠 Главное меню")
+        telebot.types.KeyboardButton("🏠 Главное меню"),
+        telebot.types.KeyboardButton("🚪 Выход")
     )
     return markup
 
@@ -479,6 +480,7 @@ def start_command(message):
         "/random - случайный рецепт\n"
         "/create - рецепт по настроению (с выбором эмоции)\n"
         "/diet_find ограничения - поиск рецептов по диете\n"
+        "/exit - выход с бота\n"
         "/help - подробная справка\n\n"
         "Приятного аппетита)"
     )
@@ -533,6 +535,7 @@ def help_command(message):
         "  Пример: `/diet_find вегетерианство без сахара`\n"
         "• `/random` - случайный рецепт\n"
         "• `/create [эмоция]` - рецепт по настроению\n"
+        "• /exit - выход с бота\n"
         "• `/help` - Эта справка\n\n"
         "*Кнопки:*\n"
         "• 🔎 Рецепт по названию - быстрый поиск по названию\n"
@@ -540,6 +543,7 @@ def help_command(message):
         "• 🎲 Случайный рецепт\n"
         "• 🎭 Рецепт под настроение - быстрый поиск при выборе эмоции\n"
         "• 🍴 Рецепты с учетом ограничений - диетический поиск\n"
+        "• 🚪 Выход"
         "• ❓ Помощь - показать справку\n"
         "• 🏠 Главное меню - вернуться\n\n"
         "✨ *Особенности:*\n"
@@ -1159,6 +1163,24 @@ def diet_button_handler(message):
         parse_mode='Markdown'
     )
     selected_command = "diet_search"
+
+
+@bot.message_handler(commands=['exit'])
+def exit_command(message):
+    """Обработчик команды /exit - выход из бота"""
+    bot.send_message(
+        message.chat.id,
+        "До свидания! Был рад помочь. Возвращайтесь за новыми рецептами!"
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "🚪 Выход")
+def exit_button_handler(message):
+    """Обработчик кнопки выхода"""
+    bot.send_message(
+        message.chat.id,
+        "До свидания! Был рад помочь. Возвращайтесь за новыми рецептами!"
+    )
 
 
 @bot.message_handler(func=lambda message: message.text == "❓ Помощь")
