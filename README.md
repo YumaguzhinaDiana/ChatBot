@@ -9,11 +9,39 @@ ChiefAssistant - бот-помощник для выбора рецепта дл
 * Помощь - вывод справки по всем функциям.
 * Выход - вывод сообщения о выходе
 
-## Главное меню
+## Команды
+### Главное меню
 
 <img width="1747" height="718" alt="image" src="https://github.com/user-attachments/assets/ed39593f-4d89-439e-8cd7-1bbf918397f5" />
 
+### Случайный рецепт
 
+<img width="1463" height="904" alt="image" src="https://github.com/user-attachments/assets/ed82df38-324b-40e0-947c-141e998a6302" />
+
+### Рецепт по настроению
+
+<img width="1460" height="639" alt="image" src="https://github.com/user-attachments/assets/28169d6b-86c3-4f0c-91ff-ef71697e3e0e" />
+<img width="963" height="806" alt="image" src="https://github.com/user-attachments/assets/48b4dd80-6800-4013-b78c-c6f5ab03f897" />
+
+### Рецепт по названию
+
+<img width="754" height="574" alt="image" src="https://github.com/user-attachments/assets/3b436be1-7e62-473e-a124-3761f7e4b651" />
+
+### Рецепт по ингредиентам
+
+<img width="570" height="620" alt="image" src="https://github.com/user-attachments/assets/727f377c-5d30-4966-aa1a-41400d9a4187" />
+
+### Рецепт с учетом ограничений
+
+<img width="1014" height="839" alt="image" src="https://github.com/user-attachments/assets/c1bf1243-f04a-419b-9dd0-8f114fc39be1" />
+
+### Помощь
+
+<img width="876" height="847" alt="image" src="https://github.com/user-attachments/assets/fff9cd47-35e4-408e-ac16-05b7da7fa345" />
+
+### Выход
+
+<img width="652" height="143" alt="image" src="https://github.com/user-attachments/assets/8798ef2b-1e36-465f-81d0-47ab5258bdb8" />
 
 ## Использованное API
 
